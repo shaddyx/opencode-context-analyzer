@@ -7,11 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 
 	"opencode-context-analyzer/internal/analyzer"
@@ -102,6 +105,33 @@ type Model struct {
 	exported  string
 	loading   bool
 	err       error
+	renderer  *renderer
+	renderW   int
+}
+
+// renderer wraps the glamour renderer with a mutex so it can be shared safely
+// across the UI thread and background render goroutines. It is recreated when
+// the target width changes so the preview fills the full terminal width.
+type renderer struct {
+	mu    sync.Mutex
+	term  *glamour.TermRenderer
+	width int
+}
+
+// ensure returns a renderer configured for the given width, recreating it if
+// the width changed. Callers must hold mu.
+func (r *renderer) ensure(width int) {
+	if r.term != nil && r.width == width {
+		return
+	}
+	if r.term != nil {
+		r.term.Close()
+	}
+	r.term, _ = glamour.NewTermRenderer(
+		glamour.WithStandardStyle(styles.DarkStyle),
+		glamour.WithWordWrap(width),
+	)
+	r.width = width
 }
 
 type state int
@@ -121,11 +151,14 @@ func New(d *db.DB, sources analyzer.Sources) Model {
 	l.SetShowHelp(true)
 	l.Styles.Title = titleStyle
 
+	// The glamour renderer is created lazily by renderer.ensure() with the
+	// current terminal width, so the preview always fills the full width.
 	return Model{
-		db:      d,
-		sources: sources,
-		state:   stateList,
-		list:    l,
+		db:       d,
+		sources:  sources,
+		state:    stateList,
+		list:     l,
+		renderer: &renderer{},
 	}
 }
 
@@ -151,6 +184,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.list.SetSize(msg.Width, msg.Height)
 		m.viewport.Width = msg.Width
 		m.viewport.Height = msg.Height
+		// Only re-render the report when the width actually changes; bubbletea
+		// can emit many resize events and each glamour render is expensive.
+		if m.state == stateReport && m.report != nil && msg.Width != m.renderW {
+			return m, m.renderCmd(m.report)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -176,10 +214,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case analysisDoneMsg:
 		m.loading = false
 		m.report = msg.report
-		m.reportMD = report.Render(msg.report)
 		m.viewport = viewport.New(m.width, m.height)
-		m.viewport.SetContent(m.reportMD)
 		m.state = stateReport
+		return m, m.renderCmd(msg.report)
+
+	case renderDoneMsg:
+		m.reportMD = msg.md
+		m.viewport.SetContent(msg.content)
+		m.renderW = msg.width
 		return m, nil
 
 	case exportDoneMsg:
@@ -187,6 +229,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// renderCmd builds the report Markdown and renders it to styled terminal text
+// in a background goroutine so the UI thread is not blocked. The renderer is
+// cached and reused across calls.
+func (m Model) renderCmd(rep *analyzer.Report) tea.Cmd {
+	width := m.width
+	return func() tea.Msg {
+		md := report.Render(rep)
+		content := m.renderMarkdown(md, width)
+		return renderDoneMsg{md, content, width}
+	}
 }
 
 func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -224,8 +278,12 @@ func (m Model) updateReport(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, func() tea.Msg {
+			md := m.reportMD
+			if md == "" {
+				md = report.Render(m.report)
+			}
 			path := exportPath(m.report)
-			if err := os.WriteFile(path, []byte(m.reportMD), 0o644); err != nil {
+			if err := os.WriteFile(path, []byte(md), 0o644); err != nil {
 				return errMsg{err}
 			}
 			return exportDoneMsg{path}
@@ -299,6 +357,26 @@ func (m Model) reportView() string {
 	return b.String()
 }
 
+// renderMarkdown converts Markdown into styled terminal text for the preview.
+// It reuses the cached renderer and falls back to raw Markdown on error.
+func (m Model) renderMarkdown(md string, width int) string {
+	r := m.renderer
+	if r == nil {
+		return md
+	}
+	if width <= 0 {
+		width = 100
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensure(width)
+	rendered, err := r.term.Render(md)
+	if err != nil {
+		return md
+	}
+	return rendered
+}
+
 // message types
 type sessionsLoadedMsg struct {
 	sessions []db.Session
@@ -308,6 +386,11 @@ type analysisDoneMsg struct {
 }
 type exportDoneMsg struct {
 	path string
+}
+type renderDoneMsg struct {
+	md      string
+	content string
+	width   int
 }
 type errMsg struct {
 	err error

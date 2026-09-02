@@ -27,6 +27,45 @@ func statusSummary(m map[string]int) string {
 	return strings.Join(parts, ", ")
 }
 
+// pct returns the percentage of part within total (0 if total is 0).
+func pct(part, total int) float64 {
+	if total <= 0 {
+		return 0
+	}
+	return float64(part) / float64(total) * 100
+}
+
+// renderStartupSubtable renders a per-category subtable of startup items.
+func renderStartupSubtable(b *strings.Builder, title string, items []analyzer.StartupItem) {
+	if len(items) == 0 {
+		return
+	}
+	b.WriteString("### " + title + "\n\n")
+	b.WriteString("| Name | Description | Description tokens | Content tokens | Descriptor tokens | % of total |\n")
+	b.WriteString("| --- | --- | --- | --- | --- | --- |\n")
+	for _, it := range items {
+		desc := it.Description
+		if desc == "" {
+			desc = "-"
+		}
+		b.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s | %s | %.1f%% |\n",
+			it.Name,
+			mdEscape(desc),
+			tokenizer.Format(it.DescriptionTokens),
+			tokenizer.Format(it.ContentTokens),
+			tokenizer.Format(it.DescriptorTokens),
+			it.Percent))
+	}
+	b.WriteString("\n")
+}
+
+// mdEscape escapes pipe characters in table cell text.
+func mdEscape(s string) string {
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
+}
+
 // Render produces a Markdown report for the given analysis.
 func Render(rep *analyzer.Report) string {
 	var b strings.Builder
@@ -55,16 +94,30 @@ func Render(rep *analyzer.Report) string {
 
 	// Startup context
 	b.WriteString("## Startup Context (loaded at session start)\n\n")
-	b.WriteString("| Component | Tokens |\n")
-	b.WriteString("| --- | --- |\n")
-	b.WriteString(fmt.Sprintf("| System prompt | %s |\n", tokenizer.Format(rep.Startup.SystemPromptTokens)))
-	b.WriteString(fmt.Sprintf("| AGENTS.md | %s |\n", tokenizer.Format(rep.Startup.AGENTSMDTokens)))
-	b.WriteString(fmt.Sprintf("| Skill descriptions | %s |\n", tokenizer.Format(rep.Startup.SkillTokens)))
-	b.WriteString(fmt.Sprintf("| Tool definitions | %s |\n", tokenizer.Format(rep.Startup.ToolTokens)))
-	b.WriteString(fmt.Sprintf("| Agent definitions | %s |\n", tokenizer.Format(rep.Startup.AgentTokens)))
-	b.WriteString(fmt.Sprintf("| MCP tool descriptions | %s |\n", tokenizer.Format(rep.Startup.MCPTokens)))
-	b.WriteString(fmt.Sprintf("| **Total startup** | **%s** |\n", tokenizer.Format(rep.Startup.Total)))
+	b.WriteString("| Component | Tokens | % of total |\n")
+	b.WriteString("| --- | --- | --- |\n")
+	b.WriteString(fmt.Sprintf("| System prompt | %s | %.1f%% |\n",
+		tokenizer.Format(rep.Startup.SystemPromptTokens), pct(rep.Startup.SystemPromptTokens, rep.Startup.Total)))
+	b.WriteString(fmt.Sprintf("| AGENTS.md | %s | %.1f%% |\n",
+		tokenizer.Format(rep.Startup.AGENTSMDTokens), pct(rep.Startup.AGENTSMDTokens, rep.Startup.Total)))
+	b.WriteString(fmt.Sprintf("| Skill descriptions | %s | %.1f%% |\n",
+		tokenizer.Format(rep.Startup.SkillTokens), pct(rep.Startup.SkillTokens, rep.Startup.Total)))
+	b.WriteString(fmt.Sprintf("| Tool definitions | %s | %.1f%% |\n",
+		tokenizer.Format(rep.Startup.ToolTokens), pct(rep.Startup.ToolTokens, rep.Startup.Total)))
+	b.WriteString(fmt.Sprintf("| Agent definitions | %s | %.1f%% |\n",
+		tokenizer.Format(rep.Startup.AgentTokens), pct(rep.Startup.AgentTokens, rep.Startup.Total)))
+	b.WriteString(fmt.Sprintf("| MCP tool descriptions | %s | %.1f%% |\n",
+		tokenizer.Format(rep.Startup.MCPTokens), pct(rep.Startup.MCPTokens, rep.Startup.Total)))
+	b.WriteString(fmt.Sprintf("| **Total startup** | **%s** | **100.0%%** |\n", tokenizer.Format(rep.Startup.Total)))
 	b.WriteString("\n")
+
+	// Per-category subtables
+	renderStartupSubtable(&b, "System Prompt", rep.Startup.SystemPrompt)
+	renderStartupSubtable(&b, "AGENTS.md", rep.Startup.AGENTSMD)
+	renderStartupSubtable(&b, "Skills", rep.Startup.Skills)
+	renderStartupSubtable(&b, "Tools", rep.Startup.Tools)
+	renderStartupSubtable(&b, "Agents", rep.Startup.Agents)
+	renderStartupSubtable(&b, "MCP", rep.Startup.MCP)
 
 	// Tools
 	b.WriteString("## Tools\n\n")

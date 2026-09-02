@@ -93,6 +93,24 @@ type StartupContext struct {
 	AgentTokens        int
 	MCPTokens          int
 	Total              int
+
+	// Detailed per-category items for subtable rendering.
+	SystemPrompt []StartupItem
+	AGENTSMD     []StartupItem
+	Skills       []StartupItem
+	Tools        []StartupItem
+	Agents       []StartupItem
+	MCP          []StartupItem
+}
+
+// StartupItem is a single row within a startup-context category subtable.
+type StartupItem struct {
+	Name             string
+	Description      string
+	DescriptionTokens int
+	ContentTokens    int
+	DescriptorTokens int
+	Percent          float64
 }
 
 // Sources describes the on-disk context sources loaded at startup.
@@ -320,12 +338,27 @@ func estimateStartup(rep *Report, src Sources) {
 		sp = 1200
 	}
 	rep.Startup.SystemPromptTokens = sp
+	rep.Startup.SystemPrompt = []StartupItem{{
+		Name:             "System prompt",
+		Description:      "Fixed opencode system prompt baseline",
+		DescriptionTokens: sp,
+		ContentTokens:    sp,
+		DescriptorTokens: sp,
+	}}
 
 	// AGENTS.md content.
 	rep.Startup.AGENTSMDTokens = 0
 	if src.AGENTSMDPath != "" {
 		if data, err := os.ReadFile(src.AGENTSMDPath); err == nil {
-			rep.Startup.AGENTSMDTokens = tokenizer.Estimate(string(data))
+			content := string(data)
+			rep.Startup.AGENTSMDTokens = tokenizer.Estimate(content)
+			rep.Startup.AGENTSMD = []StartupItem{{
+				Name:             filepath.Base(src.AGENTSMDPath),
+				Description:      "Project/global instructions loaded at startup",
+				DescriptionTokens: tokenizer.Estimate(extractDescription(content)),
+				ContentTokens:    rep.Startup.AGENTSMDTokens,
+				DescriptorTokens: rep.Startup.AGENTSMDTokens,
+			}}
 		}
 	}
 
@@ -334,15 +367,40 @@ func estimateStartup(rep *Report, src Sources) {
 	if perTool <= 0 {
 		perTool = 150
 	}
-	rep.Startup.ToolTokens = len(rep.Tools) * perTool
+	rep.Startup.ToolTokens = 0
+	rep.Startup.Tools = make([]StartupItem, 0, len(rep.Tools))
+	for _, t := range rep.Tools {
+		rep.Startup.Tools = append(rep.Startup.Tools, StartupItem{
+			Name:             t.Name,
+			Description:      "Tool definition injected into context",
+			DescriptionTokens: perTool,
+			ContentTokens:    perTool,
+			DescriptorTokens: perTool,
+		})
+		rep.Startup.ToolTokens += perTool
+	}
 
 	// Skill descriptions: read each SKILL.md in the skill dirs.
 	rep.Startup.SkillTokens = 0
 	skillFiles := collectSkillFiles(src.SkillDirs)
+	rep.Startup.Skills = make([]StartupItem, 0, len(skillFiles))
 	for _, f := range skillFiles {
-		if data, err := os.ReadFile(f); err == nil {
-			rep.Startup.SkillTokens += tokenizer.Estimate(string(data))
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
 		}
+		content := string(data)
+		contentTokens := tokenizer.Estimate(content)
+		desc := extractDescription(content)
+		descTokens := tokenizer.Estimate(desc)
+		rep.Startup.Skills = append(rep.Startup.Skills, StartupItem{
+			Name:              skillName(f),
+			Description:       desc,
+			DescriptionTokens: descTokens,
+			ContentTokens:     contentTokens,
+			DescriptorTokens:  contentTokens,
+		})
+		rep.Startup.SkillTokens += contentTokens
 	}
 
 	// Agent definitions.
@@ -350,10 +408,22 @@ func estimateStartup(rep *Report, src Sources) {
 	if perAgent <= 0 {
 		perAgent = 250
 	}
-	rep.Startup.AgentTokens = len(rep.Agents) * perAgent
+	rep.Startup.AgentTokens = 0
+	rep.Startup.Agents = make([]StartupItem, 0, len(rep.Agents))
+	for _, a := range rep.Agents {
+		rep.Startup.Agents = append(rep.Startup.Agents, StartupItem{
+			Name:             a.Name,
+			Description:      "Agent definition injected into context",
+			DescriptionTokens: perAgent,
+			ContentTokens:    perAgent,
+			DescriptorTokens: perAgent,
+		})
+		rep.Startup.AgentTokens += perAgent
+	}
 
 	// MCP tool descriptions.
 	rep.Startup.MCPTokens = 0
+	rep.Startup.MCP = []StartupItem{}
 
 	rep.Startup.Total = rep.Startup.SystemPromptTokens +
 		rep.Startup.AGENTSMDTokens +
@@ -361,6 +431,81 @@ func estimateStartup(rep *Report, src Sources) {
 		rep.Startup.SkillTokens +
 		rep.Startup.AgentTokens +
 		rep.Startup.MCPTokens
+
+	// Compute per-item percentages of the total startup context.
+	computePercents(&rep.Startup)
+}
+
+// computePercents fills the Percent field of every startup item.
+func computePercents(sc *StartupContext) {
+	total := sc.Total
+	if total <= 0 {
+		return
+	}
+	apply := func(items []StartupItem) {
+		for i := range items {
+			items[i].Percent = float64(items[i].DescriptorTokens) / float64(total) * 100
+		}
+	}
+	apply(sc.SystemPrompt)
+	apply(sc.AGENTSMD)
+	apply(sc.Skills)
+	apply(sc.Tools)
+	apply(sc.Agents)
+	apply(sc.MCP)
+}
+
+// extractDescription pulls the `description:` value from a SKILL.md frontmatter.
+// It handles both inline values and YAML block scalars (`|` and `>`).
+func extractDescription(content string) string {
+	lines := strings.Split(content, "\n")
+	inFront := false
+	blockStyle := byte(0)
+	var block []string
+	for _, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		if trimmed == "---" {
+			if !inFront {
+				inFront = true
+				continue
+			}
+			break
+		}
+		if !inFront {
+			continue
+		}
+		if blockStyle != 0 {
+			// Collect indented block lines until dedent.
+			if trimmed == "" || strings.HasPrefix(ln, " ") || strings.HasPrefix(ln, "\t") {
+				block = append(block, trimmed)
+				continue
+			}
+			break
+		}
+		if strings.HasPrefix(trimmed, "description:") {
+			val := strings.TrimSpace(strings.TrimPrefix(trimmed, "description:"))
+			if val == "|" || val == ">" || val == "|-" || val == ">-" {
+				blockStyle = val[0]
+				continue
+			}
+			val = strings.Trim(val, `"'`)
+			return val
+		}
+	}
+	if blockStyle != 0 && len(block) > 0 {
+		sep := " "
+		if blockStyle == '|' {
+			sep = "\n"
+		}
+		return strings.Join(block, sep)
+	}
+	return ""
+}
+
+// skillName derives a display name from a SKILL.md path.
+func skillName(path string) string {
+	dir := filepath.Dir(path)
+	return filepath.Base(dir)
 }
 
 func collectSkillFiles(dirs []string) []string {
