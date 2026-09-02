@@ -1,4 +1,4 @@
-module opencode-context-analyzer
+module github.com/shaddyx/opencode-context-analyzer
 
 go 1.26.5
 

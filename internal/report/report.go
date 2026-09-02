@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"opencode-context-analyzer/internal/analyzer"
-	"opencode-context-analyzer/internal/tokenizer"
+	"github.com/shaddyx/opencode-context-analyzer/internal/analyzer"
+	"github.com/shaddyx/opencode-context-analyzer/internal/tokenizer"
 )
 
 func statusSummary(m map[string]int) string {

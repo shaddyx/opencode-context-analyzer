@@ -11,9 +11,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"opencode-context-analyzer/internal/analyzer"
-	"opencode-context-analyzer/internal/db"
-	"opencode-context-analyzer/internal/tui"
+	"github.com/shaddyx/opencode-context-analyzer/internal/analyzer"
+	"github.com/shaddyx/opencode-context-analyzer/internal/db"
+	"github.com/shaddyx/opencode-context-analyzer/internal/tui"
 )
 
 func main() {

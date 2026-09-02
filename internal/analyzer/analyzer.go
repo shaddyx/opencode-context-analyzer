@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"opencode-context-analyzer/internal/tokenizer"
+	"github.com/shaddyx/opencode-context-analyzer/internal/tokenizer"
 )
 
 // ToolUsage aggregates usage for a single tool.

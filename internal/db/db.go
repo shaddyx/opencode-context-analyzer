@@ -13,7 +13,16 @@ import (
 
 // DB wraps the underlying SQLite connection.
 type DB struct {
-	sql *sql.DB
+	sql  *sql.DB
+	path string
+}
+
+// Path returns the filesystem path of the database.
+func (d *DB) Path() string {
+	if d == nil {
+		return ""
+	}
+	return d.path
 }
 
 // Open opens the opencode database at the given path (read-only).
@@ -30,7 +39,7 @@ func Open(path string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
-	return &DB{sql: sqlDB}, nil
+	return &DB{sql: sqlDB, path: path}, nil
 }
 
 // Close closes the underlying connection.
