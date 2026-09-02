@@ -65,7 +65,6 @@ func resolveAgents(p string) string {
 	}
 	candidates := []string{
 		filepath.Join(home, ".config", "opencode", "AGENTS.md"),
-		filepath.Join(home, ".config", "opencode", "AGENTS.md"),
 	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {

@@ -127,6 +127,7 @@ func Render(rep *analyzer.Report) string {
 	b.WriteString("| Metric | Value |\n")
 	b.WriteString("| --- | --- |\n")
 	b.WriteString(fmt.Sprintf("| Total estimated tokens | %s |\n", tokenizer.Format(rep.TotalTokens)))
+	b.WriteString(fmt.Sprintf("| Message tokens | %s |\n", tokenizer.Format(rep.MessageTokens)))
 	b.WriteString(fmt.Sprintf("| Total messages | %d |\n", rep.TotalMessages))
 	b.WriteString(fmt.Sprintf("| User messages | %d |\n", rep.UserMessages))
 	b.WriteString(fmt.Sprintf("| Assistant messages | %d |\n", rep.AssistantMessages))

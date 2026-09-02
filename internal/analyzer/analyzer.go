@@ -66,6 +66,7 @@ type Report struct {
 	TotalMessages    int
 	TotalSkills      int
 	TotalAgents      int
+	MessageTokens    int
 
 	// Groups
 	Tools  []ToolUsage
@@ -169,6 +170,7 @@ func Analyze(d *sql.DB, sessionID string, src Sources) (*Report, error) {
 	for _, t := range rep.Tools {
 		rep.TotalTokens += t.InputTokens + t.OutputTokens
 	}
+	rep.TotalTokens += rep.MessageTokens
 	rep.TotalSkills = len(rep.Skills)
 	rep.TotalAgents = len(rep.Agents)
 
@@ -225,6 +227,7 @@ func loadMessages(d *sql.DB, sessionID string, rep *Report) error {
 			return err
 		}
 		rep.TotalMessages++
+		rep.MessageTokens += tokenizer.Estimate(data)
 		var m struct {
 			Role  string `json:"role"`
 			Agent string `json:"agent"`
@@ -557,12 +560,4 @@ func (r *Report) AgentNames() []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-// String is a helper for building detail strings.
-func joinNames(names []string) string {
-	if len(names) == 0 {
-		return "-"
-	}
-	return strings.Join(names, ", ")
 }
