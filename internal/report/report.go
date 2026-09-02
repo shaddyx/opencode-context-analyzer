@@ -41,8 +41,10 @@ func renderStartupSubtable(b *strings.Builder, title string, items []analyzer.St
 		return
 	}
 	b.WriteString("### " + title + "\n\n")
-	b.WriteString("| Name | Description | Description tokens | Content tokens | Descriptor tokens | % of total |\n")
+	b.WriteString("| Name | Description | Description tokens | Content tokens | Loaded tokens | % of total |\n")
 	b.WriteString("| --- | --- | --- | --- | --- | --- |\n")
+	var sumDesc, sumContent, sumLoaded int
+	var sumPercent float64
 	for _, it := range items {
 		desc := it.Description
 		if desc == "" {
@@ -53,9 +55,18 @@ func renderStartupSubtable(b *strings.Builder, title string, items []analyzer.St
 			mdEscape(desc),
 			tokenizer.Format(it.DescriptionTokens),
 			tokenizer.Format(it.ContentTokens),
-			tokenizer.Format(it.DescriptorTokens),
+			tokenizer.Format(it.LoadedTokens),
 			it.Percent))
+		sumDesc += it.DescriptionTokens
+		sumContent += it.ContentTokens
+		sumLoaded += it.LoadedTokens
+		sumPercent += it.Percent
 	}
+	b.WriteString(fmt.Sprintf("| **Total** | | **%s** | **%s** | **%s** | **%.1f%%** |\n",
+		tokenizer.Format(sumDesc),
+		tokenizer.Format(sumContent),
+		tokenizer.Format(sumLoaded),
+		sumPercent))
 	b.WriteString("\n")
 }
 
@@ -126,6 +137,7 @@ func Render(rep *analyzer.Report) string {
 	} else {
 		b.WriteString("| Tool | Calls | Input tokens | Output tokens | Total tokens | Status |\n")
 		b.WriteString("| --- | --- | --- | --- | --- | --- |\n")
+		var sumCalls, sumInput, sumOutput int
 		for _, t := range rep.Tools {
 			total := t.InputTokens + t.OutputTokens
 			status := statusSummary(t.Status)
@@ -135,7 +147,15 @@ func Render(rep *analyzer.Report) string {
 				tokenizer.Format(t.OutputTokens),
 				tokenizer.Format(total),
 				status))
+			sumCalls += t.Calls
+			sumInput += t.InputTokens
+			sumOutput += t.OutputTokens
 		}
+		b.WriteString(fmt.Sprintf("| **Total** | **%d** | **%s** | **%s** | **%s** | |\n",
+			sumCalls,
+			tokenizer.Format(sumInput),
+			tokenizer.Format(sumOutput),
+			tokenizer.Format(sumInput+sumOutput)))
 	}
 	b.WriteString("\n")
 
@@ -146,9 +166,13 @@ func Render(rep *analyzer.Report) string {
 	} else {
 		b.WriteString("| Skill | Loads | Tokens |\n")
 		b.WriteString("| --- | --- | --- |\n")
+		var sumLoads, sumTokens int
 		for _, s := range rep.Skills {
 			b.WriteString(fmt.Sprintf("| `%s` | %d | %s |\n", s.Name, s.Loads, tokenizer.Format(s.Tokens)))
+			sumLoads += s.Loads
+			sumTokens += s.Tokens
 		}
+		b.WriteString(fmt.Sprintf("| **Total** | **%d** | **%s** |\n", sumLoads, tokenizer.Format(sumTokens)))
 	}
 	b.WriteString("\n")
 
@@ -159,9 +183,13 @@ func Render(rep *analyzer.Report) string {
 	} else {
 		b.WriteString("| Agent | Messages | Tokens |\n")
 		b.WriteString("| --- | --- | --- |\n")
+		var sumMessages, sumTokens int
 		for _, a := range rep.Agents {
 			b.WriteString(fmt.Sprintf("| `%s` | %d | %s |\n", a.Name, a.Messages, tokenizer.Format(a.Tokens)))
+			sumMessages += a.Messages
+			sumTokens += a.Tokens
 		}
+		b.WriteString(fmt.Sprintf("| **Total** | **%d** | **%s** |\n", sumMessages, tokenizer.Format(sumTokens)))
 	}
 	b.WriteString("\n")
 

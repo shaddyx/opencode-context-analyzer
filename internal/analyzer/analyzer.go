@@ -109,7 +109,7 @@ type StartupItem struct {
 	Description      string
 	DescriptionTokens int
 	ContentTokens    int
-	DescriptorTokens int
+	LoadedTokens     int
 	Percent          float64
 }
 
@@ -343,7 +343,7 @@ func estimateStartup(rep *Report, src Sources) {
 		Description:      "Fixed opencode system prompt baseline",
 		DescriptionTokens: sp,
 		ContentTokens:    sp,
-		DescriptorTokens: sp,
+		LoadedTokens:     sp,
 	}}
 
 	// AGENTS.md content.
@@ -357,7 +357,7 @@ func estimateStartup(rep *Report, src Sources) {
 				Description:      "Project/global instructions loaded at startup",
 				DescriptionTokens: tokenizer.Estimate(extractDescription(content)),
 				ContentTokens:    rep.Startup.AGENTSMDTokens,
-				DescriptorTokens: rep.Startup.AGENTSMDTokens,
+				LoadedTokens:     rep.Startup.AGENTSMDTokens,
 			}}
 		}
 	}
@@ -375,12 +375,13 @@ func estimateStartup(rep *Report, src Sources) {
 			Description:      "Tool definition injected into context",
 			DescriptionTokens: perTool,
 			ContentTokens:    perTool,
-			DescriptorTokens: perTool,
+			LoadedTokens:     perTool,
 		})
 		rep.Startup.ToolTokens += perTool
 	}
 
-	// Skill descriptions: read each SKILL.md in the skill dirs.
+	// Skill descriptions: read each SKILL.md in the skill dirs. At startup only
+	// the frontmatter description is loaded into context, not the full file.
 	rep.Startup.SkillTokens = 0
 	skillFiles := collectSkillFiles(src.SkillDirs)
 	rep.Startup.Skills = make([]StartupItem, 0, len(skillFiles))
@@ -398,9 +399,9 @@ func estimateStartup(rep *Report, src Sources) {
 			Description:       desc,
 			DescriptionTokens: descTokens,
 			ContentTokens:     contentTokens,
-			DescriptorTokens:  contentTokens,
+			LoadedTokens:      descTokens,
 		})
-		rep.Startup.SkillTokens += contentTokens
+		rep.Startup.SkillTokens += descTokens
 	}
 
 	// Agent definitions.
@@ -416,7 +417,7 @@ func estimateStartup(rep *Report, src Sources) {
 			Description:      "Agent definition injected into context",
 			DescriptionTokens: perAgent,
 			ContentTokens:    perAgent,
-			DescriptorTokens: perAgent,
+			LoadedTokens:     perAgent,
 		})
 		rep.Startup.AgentTokens += perAgent
 	}
@@ -444,7 +445,7 @@ func computePercents(sc *StartupContext) {
 	}
 	apply := func(items []StartupItem) {
 		for i := range items {
-			items[i].Percent = float64(items[i].DescriptorTokens) / float64(total) * 100
+			items[i].Percent = float64(items[i].LoadedTokens) / float64(total) * 100
 		}
 	}
 	apply(sc.SystemPrompt)
