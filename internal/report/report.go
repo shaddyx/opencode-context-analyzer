@@ -36,37 +36,70 @@ func pct(part, total int) float64 {
 }
 
 // renderStartupSubtable renders a per-category subtable of startup items.
+// When every item's ContentTokens equals LoadedTokens (e.g. tools, agents),
+// the two columns are collapsed into a single "Tokens" column.
 func renderStartupSubtable(b *strings.Builder, title string, items []analyzer.StartupItem) {
 	if len(items) == 0 {
 		return
 	}
+	distinct := false
+	for _, it := range items {
+		if it.ContentTokens != it.LoadedTokens {
+			distinct = true
+			break
+		}
+	}
 	b.WriteString("### " + title + "\n\n")
-	b.WriteString("| Name | Description | Description tokens | Content tokens | Loaded tokens | % of total |\n")
-	b.WriteString("| --- | --- | --- | --- | --- | --- |\n")
 	var sumDesc, sumContent, sumLoaded int
 	var sumPercent float64
-	for _, it := range items {
-		desc := it.Description
-		if desc == "" {
-			desc = "-"
+	if distinct {
+		b.WriteString("| Name | Description | Description tokens | Content tokens | Loaded tokens | % of total |\n")
+		b.WriteString("| --- | --- | --- | --- | --- | --- |\n")
+		for _, it := range items {
+			desc := it.Description
+			if desc == "" {
+				desc = "-"
+			}
+			b.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s | %s | %.1f%% |\n",
+				it.Name,
+				mdEscape(desc),
+				tokenizer.Format(it.DescriptionTokens),
+				tokenizer.Format(it.ContentTokens),
+				tokenizer.Format(it.LoadedTokens),
+				it.Percent))
+			sumDesc += it.DescriptionTokens
+			sumContent += it.ContentTokens
+			sumLoaded += it.LoadedTokens
+			sumPercent += it.Percent
 		}
-		b.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s | %s | %.1f%% |\n",
-			it.Name,
-			mdEscape(desc),
-			tokenizer.Format(it.DescriptionTokens),
-			tokenizer.Format(it.ContentTokens),
-			tokenizer.Format(it.LoadedTokens),
-			it.Percent))
-		sumDesc += it.DescriptionTokens
-		sumContent += it.ContentTokens
-		sumLoaded += it.LoadedTokens
-		sumPercent += it.Percent
+		b.WriteString(fmt.Sprintf("| **Total** | | **%s** | **%s** | **%s** | **%.1f%%** |\n",
+			tokenizer.Format(sumDesc),
+			tokenizer.Format(sumContent),
+			tokenizer.Format(sumLoaded),
+			sumPercent))
+	} else {
+		b.WriteString("| Name | Description | Description tokens | Tokens | % of total |\n")
+		b.WriteString("| --- | --- | --- | --- | --- |\n")
+		for _, it := range items {
+			desc := it.Description
+			if desc == "" {
+				desc = "-"
+			}
+			b.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s | %.1f%% |\n",
+				it.Name,
+				mdEscape(desc),
+				tokenizer.Format(it.DescriptionTokens),
+				tokenizer.Format(it.LoadedTokens),
+				it.Percent))
+			sumDesc += it.DescriptionTokens
+			sumLoaded += it.LoadedTokens
+			sumPercent += it.Percent
+		}
+		b.WriteString(fmt.Sprintf("| **Total** | | **%s** | **%s** | **%.1f%%** |\n",
+			tokenizer.Format(sumDesc),
+			tokenizer.Format(sumLoaded),
+			sumPercent))
 	}
-	b.WriteString(fmt.Sprintf("| **Total** | | **%s** | **%s** | **%s** | **%.1f%%** |\n",
-		tokenizer.Format(sumDesc),
-		tokenizer.Format(sumContent),
-		tokenizer.Format(sumLoaded),
-		sumPercent))
 	b.WriteString("\n")
 }
 
@@ -129,6 +162,11 @@ func Render(rep *analyzer.Report) string {
 	renderStartupSubtable(&b, "Tools", rep.Startup.Tools)
 	renderStartupSubtable(&b, "Agents", rep.Startup.Agents)
 	renderStartupSubtable(&b, "MCP", rep.Startup.MCP)
+
+	// Delimiter marking the end of the startup context and the start of the
+	// session's own content.
+	b.WriteString("---\n\n")
+	b.WriteString("## Session Content\n\n")
 
 	// Tools
 	b.WriteString("## Tools\n\n")
