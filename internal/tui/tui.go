@@ -17,10 +17,10 @@ import (
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 
-	"opencode-context-analyzer/internal/analyzer"
-	"opencode-context-analyzer/internal/db"
-	"opencode-context-analyzer/internal/report"
-	"opencode-context-analyzer/internal/tokenizer"
+	"github.com/shaddyx/opencode-context-analyzer/internal/analyzer"
+	"github.com/shaddyx/opencode-context-analyzer/internal/db"
+	"github.com/shaddyx/opencode-context-analyzer/internal/report"
+	"github.com/shaddyx/opencode-context-analyzer/internal/tokenizer"
 )
 
 // Styles
@@ -39,6 +39,10 @@ var (
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#626262"))
 )
+
+// listHeaderHeight is the number of terminal rows reserved above the session
+// list for the title and database path indicator.
+const listHeaderHeight = 3
 
 // sessionItem adapts a db.Session to a list.Item.
 type sessionItem struct {
@@ -94,6 +98,7 @@ func timeAgo(t time.Time) string {
 // Model is the root TUI model.
 type Model struct {
 	db        *db.DB
+	dbPath    string
 	sources   analyzer.Sources
 	width     int
 	height    int
@@ -155,6 +160,7 @@ func New(d *db.DB, sources analyzer.Sources) Model {
 	// current terminal width, so the preview always fills the full width.
 	return Model{
 		db:       d,
+		dbPath:   d.Path(),
 		sources:  sources,
 		state:    stateList,
 		list:     l,
@@ -181,7 +187,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetSize(msg.Width, msg.Height)
+		m.list.SetSize(msg.Width, msg.Height-listHeaderHeight)
 		m.viewport.Width = msg.Width
 		m.viewport.Height = msg.Height
 		// Only re-render the report when the width actually changes; bubbletea
@@ -297,15 +303,11 @@ func (m Model) updateReport(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func exportPath(rep *analyzer.Report) string {
-	dir := "."
-	if rep.Directory != "" {
-		dir = rep.Directory
-	}
 	slug := sanitize(rep.SessionTitle)
 	if slug == "" {
 		slug = rep.SessionID
 	}
-	return filepath.Join(dir, fmt.Sprintf("context-report-%s.md", slug))
+	return filepath.Join(".", fmt.Sprintf("context-report-%s.md", slug))
 }
 
 func sanitize(s string) string {
@@ -328,11 +330,19 @@ func (m Model) View() string {
 	}
 	switch m.state {
 	case stateList:
-		return m.list.View()
+		return m.listView()
 	case stateReport:
 		return m.reportView()
 	}
 	return ""
+}
+
+func (m Model) listView() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("OpenCode Context Analyzer") + "\n")
+	b.WriteString(infoStyle.Render("DB: "+m.dbPath) + "\n\n")
+	b.WriteString(m.list.View())
+	return b.String()
 }
 
 func (m Model) reportView() string {
@@ -344,6 +354,7 @@ func (m Model) reportView() string {
 	}
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Context Report: "+m.report.SessionTitle) + "\n")
+	b.WriteString(infoStyle.Render("DB: "+m.dbPath) + "\n")
 	b.WriteString(infoStyle.Render(fmt.Sprintf("Total: %s tokens | %d tool calls | %d skills | %d agents",
 		tokenizer.Format(m.report.TotalTokens),
 		m.report.TotalToolCalls,
