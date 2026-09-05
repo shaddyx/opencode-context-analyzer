@@ -3,6 +3,7 @@
 package analyzer
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -10,7 +11,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/shaddyx/opencode-context-analyzer/internal/mcp"
 	"github.com/shaddyx/opencode-context-analyzer/internal/tokenizer"
 )
 
@@ -83,6 +86,11 @@ type Report struct {
 	TextParts      int
 	FileParts      int
 	PatchParts     int
+
+	// RealStartupTokens is the provider-reported input token count of the
+	// session's first assistant message (0 if unknown). It is the ground
+	// truth for the startup context size.
+	RealStartupTokens int
 }
 
 // StartupContext estimates the fixed context loaded at session start.
@@ -120,11 +128,16 @@ type Sources struct {
 	AGENTSMDPath string
 	// SkillDirs are directories containing SKILL.md files (optional).
 	SkillDirs []string
-	// ToolTokensPerTool is the estimated tokens per tool definition.
-	ToolTokensPerTool int
-	// AgentTokensPerAgent is the estimated tokens per agent definition.
-	AgentTokensPerAgent int
-	// SystemPromptTokens is the fixed system prompt baseline.
+	// ConfigPath is the opencode JSONC config file whose "mcp" section is
+	// used to discover MCP servers and their tool definitions (optional).
+	ConfigPath string
+	// AgentsDir is the directory containing agent definition .md files
+	// (optional).
+	AgentsDir string
+	// MCPTimeout bounds each MCP server's tool discovery.
+	MCPTimeout time.Duration
+	// SystemPromptTokens is the heuristic baseline for the opencode core
+	// system prompt text.
 	SystemPromptTokens int
 }
 
@@ -190,6 +203,23 @@ func loadSessionMeta(d *sql.DB, rep *Report) error {
 	rep.Directory = dir.String
 	rep.Model = model.String
 	rep.Agent = agent.String
+
+	// Provider-reported input tokens of the first assistant message: the
+	// actual startup context size (system prompt + tools + AGENTS.md +
+	// skills + agents + first user message).
+	var real int
+	err := d.QueryRow(`
+		SELECT COALESCE(json_extract(data, '$.tokens.input'), 0)
+		FROM message
+		WHERE session_id = ?
+		  AND json_extract(data, '$.role') = 'assistant'
+		  AND COALESCE(json_extract(data, '$.tokens.input'), 0) > 0
+		ORDER BY time_created ASC
+		LIMIT 1
+	`, rep.SessionID).Scan(&real)
+	if err == nil {
+		rep.RealStartupTokens = real
+	}
 	return nil
 }
 
@@ -334,16 +364,35 @@ func sortTools(tools []ToolUsage) {
 	})
 }
 
+// builtinToolTokens holds tuned estimates (in tokens) for the JSON schema of
+// opencode's built-in tools (v1.18.x). Each value approximates the size of
+// the tool's name + description + parameter schema as sent to the provider
+// at session startup.
+var builtinToolTokens = map[string]int{
+	"bash":      650,
+	"compress":  800,
+	"edit":      380,
+	"glob":      200,
+	"grep":      240,
+	"question":  280,
+	"read":      340,
+	"skill":     110,
+	"task":      750,
+	"todowrite": 850,
+	"webfetch":  220,
+	"write":     180,
+}
+
 func estimateStartup(rep *Report, src Sources) {
-	// System prompt is a fixed baseline.
+	// System prompt baseline (heuristic).
 	sp := src.SystemPromptTokens
 	if sp <= 0 {
-		sp = 1200
+		sp = 2500
 	}
 	rep.Startup.SystemPromptTokens = sp
 	rep.Startup.SystemPrompt = []StartupItem{{
 		Name:             "System prompt",
-		Description:      "Fixed opencode system prompt baseline",
+		Description:      "Fixed opencode system prompt baseline (heuristic)",
 		DescriptionTokens: sp,
 		ContentTokens:    sp,
 		LoadedTokens:     sp,
@@ -365,23 +414,32 @@ func estimateStartup(rep *Report, src Sources) {
 		}
 	}
 
-	// Tool definitions: each distinct tool contributes a description.
-	perTool := src.ToolTokensPerTool
-	if perTool <= 0 {
-		perTool = 150
-	}
+	// Built-in tool definitions: tuned estimates for the full set of
+	// opencode core tools (their schemas are sent at every startup).
 	rep.Startup.ToolTokens = 0
-	rep.Startup.Tools = make([]StartupItem, 0, len(rep.Tools))
-	for _, t := range rep.Tools {
-		rep.Startup.Tools = append(rep.Startup.Tools, StartupItem{
-			Name:             t.Name,
-			Description:      "Tool definition injected into context",
-			DescriptionTokens: perTool,
-			ContentTokens:    perTool,
-			LoadedTokens:     perTool,
-		})
-		rep.Startup.ToolTokens += perTool
+	names := make([]string, 0, len(builtinToolTokens))
+	for name := range builtinToolTokens {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	rep.Startup.Tools = make([]StartupItem, 0, len(names))
+	for _, name := range names {
+		toks := builtinToolTokens[name]
+		rep.Startup.Tools = append(rep.Startup.Tools, StartupItem{
+			Name:              name,
+			Description:       "Built-in tool schema (tuned estimate)",
+			DescriptionTokens: toks,
+			ContentTokens:     toks,
+			LoadedTokens:      toks,
+		})
+		rep.Startup.ToolTokens += toks
+	}
+	sort.Slice(rep.Startup.Tools, func(i, j int) bool {
+		if rep.Startup.Tools[i].LoadedTokens != rep.Startup.Tools[j].LoadedTokens {
+			return rep.Startup.Tools[i].LoadedTokens > rep.Startup.Tools[j].LoadedTokens
+		}
+		return rep.Startup.Tools[i].Name < rep.Startup.Tools[j].Name
+	})
 
 	// Skill descriptions: read each SKILL.md in the skill dirs. At startup only
 	// the frontmatter description is loaded into context, not the full file.
@@ -406,28 +464,41 @@ func estimateStartup(rep *Report, src Sources) {
 		})
 		rep.Startup.SkillTokens += descTokens
 	}
+	sort.Slice(rep.Startup.Skills, func(i, j int) bool {
+		if rep.Startup.Skills[i].DescriptionTokens != rep.Startup.Skills[j].DescriptionTokens {
+			return rep.Startup.Skills[i].DescriptionTokens > rep.Startup.Skills[j].DescriptionTokens
+		}
+		return rep.Startup.Skills[i].Name < rep.Startup.Skills[j].Name
+	})
 
-	// Agent definitions.
-	perAgent := src.AgentTokensPerAgent
-	if perAgent <= 0 {
-		perAgent = 250
-	}
+	// Agent definitions: read the agent .md files if a dir is configured,
+	// otherwise fall back to a flat estimate per agent used in the session.
 	rep.Startup.AgentTokens = 0
-	rep.Startup.Agents = make([]StartupItem, 0, len(rep.Agents))
-	for _, a := range rep.Agents {
-		rep.Startup.Agents = append(rep.Startup.Agents, StartupItem{
-			Name:             a.Name,
-			Description:      "Agent definition injected into context",
-			DescriptionTokens: perAgent,
-			ContentTokens:    perAgent,
-			LoadedTokens:     perAgent,
-		})
-		rep.Startup.AgentTokens += perAgent
+	if src.AgentsDir != "" {
+		rep.Startup.Agents = loadAgentItems(src.AgentsDir)
+		for _, a := range rep.Startup.Agents {
+			rep.Startup.AgentTokens += a.LoadedTokens
+		}
+	} else {
+		rep.Startup.Agents = make([]StartupItem, 0, len(rep.Agents))
+		for _, a := range rep.Agents {
+			rep.Startup.Agents = append(rep.Startup.Agents, StartupItem{
+				Name:              a.Name,
+				Description:       "Agent definition (flat estimate)",
+				DescriptionTokens: 250,
+				ContentTokens:     250,
+				LoadedTokens:      250,
+			})
+			rep.Startup.AgentTokens += 250
+		}
 	}
 
-	// MCP tool descriptions.
+	// MCP tool definitions: live discovery via the MCP protocol.
 	rep.Startup.MCPTokens = 0
-	rep.Startup.MCP = []StartupItem{}
+	rep.Startup.MCP = loadMCPItems(src)
+	for _, item := range rep.Startup.MCP {
+		rep.Startup.MCPTokens += item.LoadedTokens
+	}
 
 	rep.Startup.Total = rep.Startup.SystemPromptTokens +
 		rep.Startup.AGENTSMDTokens +
@@ -530,6 +601,107 @@ func collectSkillFiles(dirs []string) []string {
 		}
 	}
 	return files
+}
+
+// loadAgentItems reads agent definition .md files and estimates their token
+// cost. The full definition (frontmatter + body) is what opencode loads.
+func loadAgentItems(dir string) []StartupItem {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return []StartupItem{}
+	}
+	var items []StartupItem
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		toks := tokenizer.Estimate(content)
+		desc := extractDescription(content)
+		items = append(items, StartupItem{
+			Name:              strings.TrimSuffix(e.Name(), ".md"),
+			Description:       desc,
+			DescriptionTokens: tokenizer.Estimate(desc),
+			ContentTokens:     toks,
+			LoadedTokens:      toks,
+		})
+	}
+	// Agent definitions are loaded in full at startup, so sort by total size.
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].LoadedTokens != items[j].LoadedTokens {
+			return items[i].LoadedTokens > items[j].LoadedTokens
+		}
+		return items[i].Name < items[j].Name
+	})
+	return items
+}
+
+// loadMCPItems discovers MCP servers from the opencode config and fetches
+// their tool lists live. Each tool's compact JSON definition is tokenized.
+func loadMCPItems(src Sources) []StartupItem {
+	items := []StartupItem{}
+	if src.ConfigPath == "" {
+		return items
+	}
+	servers, err := mcp.LoadServers(src.ConfigPath)
+	if err != nil {
+		return []StartupItem{{
+			Name:        "(mcp config)",
+			Description: "config error: " + shortText(err.Error()),
+			LoadedTokens: 0,
+		}}
+	}
+	timeout := src.MCPTimeout
+	if timeout <= 0 {
+		timeout = mcp.DefaultTimeout()
+	}
+	for _, s := range servers {
+		if !s.Enabled {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		tools, err := s.ListTools(ctx)
+		cancel()
+		if err != nil {
+			items = append(items, StartupItem{
+				Name:         s.Name,
+				Description:  "discovery failed: " + shortText(err.Error()),
+				LoadedTokens: 0,
+			})
+			continue
+		}
+		for _, t := range tools {
+			toks := tokenizer.Estimate(t.JSONDefinition())
+			items = append(items, StartupItem{
+				Name:              s.Name + "_" + t.Name,
+				Description:       shortText(t.Description),
+				DescriptionTokens: tokenizer.Estimate(t.Description),
+				ContentTokens:     toks,
+				LoadedTokens:      toks,
+			})
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].DescriptionTokens != items[j].DescriptionTokens {
+			return items[i].DescriptionTokens > items[j].DescriptionTokens
+		}
+		return items[i].Name < items[j].Name
+	})
+	return items
+}
+
+// shortText collapses whitespace and truncates for table cells.
+func shortText(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	if len(s) > 120 {
+		s = s[:120] + "…"
+	}
+	return s
 }
 
 // ToolNames returns the sorted list of distinct tool names.

@@ -164,6 +164,20 @@ func Render(rep *analyzer.Report) string {
 	renderStartupSubtable(&b, "Agents", rep.Startup.Agents)
 	renderStartupSubtable(&b, "MCP", rep.Startup.MCP)
 
+	// Compare the estimate against the provider-reported startup size.
+	if rep.RealStartupTokens > 0 {
+		delta := rep.RealStartupTokens - rep.Startup.Total
+		b.WriteString("## Startup Accuracy\n\n")
+		b.WriteString("| Metric | Value |\n")
+		b.WriteString("| --- | --- |\n")
+		b.WriteString(fmt.Sprintf("| Provider-reported (first-turn input) | %s |\n", tokenizer.Format(rep.RealStartupTokens)))
+		b.WriteString(fmt.Sprintf("| Estimated startup total | %s |\n", tokenizer.Format(rep.Startup.Total)))
+		b.WriteString(fmt.Sprintf("| Residual (delta) | %s |\n", tokenizer.Format(delta)))
+		b.WriteString("\n")
+		b.WriteString("The residual covers pieces the estimate cannot reconstruct: the exact system-prompt " +
+			"text, plugin-provided tools, the first user message, and tokenizer differences.\n\n")
+	}
+
 	// Delimiter marking the end of the startup context and the start of the
 	// session's own content.
 	b.WriteString("---\n\n")
